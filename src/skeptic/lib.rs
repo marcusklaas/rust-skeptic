@@ -11,7 +11,7 @@ use std::io::{self, Read, Write, Error as IoError};
 use std::mem;
 use std::path::{PathBuf, Path};
 use std::collections::HashMap;
-use cmark::{Parser, Event, Tag};
+use cmark::{Parser, Event, Tag, CodeBlockKind};
 
 /// Returns a list of markdown files under a directory.
 ///
@@ -194,33 +194,25 @@ fn extract_tests_from_file(path: &Path) -> Result<DocTest, IoError> {
 fn extract_tests_from_string(s: &str, file_stem: &str) -> (Vec<Test>, Option<String>) {
     let mut tests = Vec::new();
     let mut buffer = Buffer::None;
-    let mut parser = Parser::new(s);
+    let parser = Parser::new(s).into_offset_iter();
     let mut section = None;
     let mut code_block_start = 0;
     // Oh this isn't actually a test but a legacy template
     let mut old_template = None;
 
-    // In order to call get_offset() on the parser,
-    // this loop must not hold an exclusive reference to the parser.
-    loop {
-        let offset = parser.get_offset();
-        let line_number = bytecount::count(&s.as_bytes()[0..offset], b'\n');
-        let event = if let Some(event) = parser.next() {
-            event
-        } else {
-            break;
-        };
+    for (event, span) in parser {
+        let line_number = bytecount::count(&s.as_bytes()[0..span.start], b'\n');
         match event {
-            Event::Start(Tag::Header(level)) if level < 3 => {
+            Event::Start(Tag::Heading(level)) if level < 3 => {
                 buffer = Buffer::Header(String::new());
             }
-            Event::End(Tag::Header(level)) if level < 3 => {
+            Event::End(Tag::Heading(level)) if level < 3 => {
                 let cur_buffer = mem::replace(&mut buffer, Buffer::None);
                 if let Buffer::Header(sect) = cur_buffer {
                     section = Some(sanitize_test_name(&sect));
                 }
             }
-            Event::Start(Tag::CodeBlock(ref info)) => {
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(ref info))) => {
                 let code_block_info = parse_code_block_info(info);
                 if code_block_info.is_rust {
                     buffer = Buffer::Code(Vec::new());
@@ -231,12 +223,12 @@ fn extract_tests_from_string(s: &str, file_stem: &str) -> (Vec<Test>, Option<Str
                     if buf.is_empty() {
                         code_block_start = line_number;
                     }
-                    buf.push(text.into_owned());
+                    buf.push(text.into_string());
                 } else if let Buffer::Header(ref mut buf) = buffer {
                     buf.push_str(&*text);
                 }
             }
-            Event::End(Tag::CodeBlock(ref info)) => {
+            Event::End(Tag::CodeBlock(CodeBlockKind::Fenced(ref info))) => {
                 let code_block_info = parse_code_block_info(info);
                 if let Buffer::Code(buf) = mem::replace(&mut buffer, Buffer::None) {
                     if code_block_info.is_old_template {
@@ -285,7 +277,7 @@ fn load_templates(path: &Path) -> Result<HashMap<String, String>, IoError> {
 
     for event in parser {
         match event {
-            Event::Start(Tag::CodeBlock(ref info)) => {
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(ref info))) => {
                 let code_block_info = parse_code_block_info(info);
                 if code_block_info.is_rust {
                     code_buffer = Some(Vec::new());
@@ -296,7 +288,7 @@ fn load_templates(path: &Path) -> Result<HashMap<String, String>, IoError> {
                     buf.push(text.to_string());
                 }
             }
-            Event::End(Tag::CodeBlock(ref info)) => {
+            Event::End(Tag::CodeBlock(CodeBlockKind::Fenced(ref info))) => {
                 let code_block_info = parse_code_block_info(info);
                 if let Some(buf) = code_buffer.take() {
                     if let Some(t) = code_block_info.template {
